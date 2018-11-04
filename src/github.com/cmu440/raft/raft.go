@@ -92,6 +92,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
+	applyHelperCh chan ApplyMsg
 	applyCh chan ApplyMsg
 
 	timerTicker chan bool
@@ -225,19 +226,29 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mux.Lock()
-	if args.Term >= rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.role = Follower
-		rf.timeReset <- MAX_NORMAL
-		rf.votedFor = -1
-		rf.voteCount = 0
-		reply.Term = args.Term
-		reply.Success = true
-	} else {
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		rf.mux.Unlock()
+		return
 	}
-	rf.mux.Unlock()
+	if args.Entries.Command == nil {
+		if args.Term >= rf.currentTerm {
+			rf.role = Follower
+			rf.timeReset <- MAX_NORMAL
+			rf.votedFor = -1
+			rf.voteCount = 0
+
+			reply.Term = args.Term
+			reply.Success = true
+		} else {
+			reply.Term = rf.currentTerm
+			reply.Success = false
+		}
+		rf.mux.Unlock()
+		return
+	}
+
 }
 
 //
@@ -310,6 +321,13 @@ func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestV
 			rf.timeReset <- MIN_LEADER
 			rf.voteCount = 0
 			rf.role = Leader
+			for i := 0; i < rf.population; i++ {
+				if i == rf.me {
+					continue
+				}
+				rf.nextIndex[i] = rf.lastLoggedIndex + 1
+				rf.matchIndex[i] = 0
+			}
 		}
 		rf.mux.Unlock()
 	}
@@ -350,7 +368,14 @@ func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs, reply *Appe
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+
+	rf.mux.Lock()
+	isLeader := rf.role == Leader
+	if !isLeader {
+		rf.mux.Unlock()
+		return  index, term, isLeader
+	}
+	// is a Leader
 	// Your code here (2B)
 	return index, term, isLeader
 }
@@ -401,14 +426,23 @@ func Make(peers []*rpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 		votedFor:        -1,
 		timerTicker:     make(chan bool),
 		timeReset:       make(chan int),
+		applyHelperCh:   make(chan ApplyMsg),
 		role:            Follower,
 		voteCount:       0,
 		population:      len(peers),
 		lastLoggedIndex: 0,
 		lastLoggedTerm:  0,
+
+		commitIndex:     0,
+		lastApplied:     0,
+		nextIndex:       make([]int, len(peers)),
+		matchIndex:      make([]int, len(peers)),
+		log:make([]Log, 1),
 	}
+
 	go rf.timerRoutine()
 	go rf.mainRoutine()
+	go rf.applyRoutine()
 	// Your initialization code here (2A, 2B)
 	return rf
 }
@@ -424,7 +458,7 @@ func (rf *Raft) mainRoutine() {
 				rf.currentTerm += 1
 				rf.role = Candidate
 				rf.votedFor = rf.me
-				rf.voteCount += 1
+				rf.voteCount = 1
 				for i := 0; i < rf.population; i++ {
 					if i == rf.me {
 						continue
@@ -439,7 +473,6 @@ func (rf *Raft) mainRoutine() {
 				}
 				rf.mux.Unlock()
 			case Leader:
-				rf.role = Leader
 				for i := 0; i < rf.population; i++ {
 					if i == rf.me {
 						continue
@@ -450,7 +483,7 @@ func (rf *Raft) mainRoutine() {
 							LeaderId:     rf.me,
 							PrevLogIndex: 0,   // problem
 							PrevLogTerm:  0,   //problem
-							Entries:      Log{}, // problem
+							Entries:      Log{Command:nil}, // problem
 							LeaderCommit: 0,   // problem
 						}, &AppendEntriesReply{})
 				}
@@ -477,6 +510,15 @@ func (rf *Raft) timerRoutine() {
 			}
 		case <-timer.C:
 			rf.timerTicker <- true
+		}
+	}
+}
+
+func (rf *Raft) applyRoutine() {
+	for {
+		select {
+		case msg := <- rf.applyHelperCh:
+			rf.applyCh <- msg
 		}
 	}
 }
