@@ -37,7 +37,6 @@ import (
 	"time"
 )
 
-
 // Constant
 const MAX_NORMAL = 400
 const MIN_NORMAL = 250
@@ -45,10 +44,11 @@ const MAX_LEADER = 249
 const MIN_LEADER = 201
 
 const (
-	Follower = 0
+	Follower  = 0
 	Candidate = 1
-	Leader = 2
+	Leader    = 2
 )
+
 //
 // ApplyMsg
 // ========
@@ -64,7 +64,7 @@ type ApplyMsg struct {
 
 type Log struct {
 	Command interface{}
-	Term int
+	Term    int
 }
 
 //
@@ -74,39 +74,34 @@ type Log struct {
 // A Go object implementing a single Raft peer
 //
 type Raft struct {
-	mux   sync.Mutex        // Lock to protect shared access to this peer's state
-	peers []*rpc.ClientEnd  // RPC end points of all peers
-	me    int               // this peer's index into peers[]
+	mux   sync.Mutex       // Lock to protect shared access to this peer's state
+	peers []*rpc.ClientEnd // RPC end points of all peers
+	me    int              // this peer's index into peers[]
 
 	// Your data here (2A, 2B).
 	// Look at the Raft paper's Figure 2 for a description of what
 	// state a Raft peer should maintain
 	// Persistent state
 	currentTerm int
-	votedFor int
-	log[] Log // problem
+	votedFor    int
+	log         []Log
 	// Volatile State
 	commitIndex int
 	lastApplied int
-
 	//Volatile state on leaders
-	nextIndex[] int
-	matchIndex[] int
+	nextIndex  []int
+	matchIndex []int
 
 	applyCh chan ApplyMsg
 
 	timerTicker chan bool
-	timeReset chan int
-	//voteCh chan int
-	voteCount int
+	timeReset   chan int
+	voteCount   int
 
-	leaderCh chan int
-	candidateCh chan int
-	followerCh chan int
-
-	role int
-	population int
-
+	role            int
+	population      int
+	lastLoggedIndex int
+	lastLoggedTerm  int
 }
 
 //
@@ -127,7 +122,7 @@ func (rf *Raft) GetState() (int, int, bool) {
 	me = rf.me
 	term = rf.currentTerm
 	rf.mux.Unlock()
-	// Your code here (2A)
+
 	return me, term, isleader
 }
 
@@ -143,10 +138,10 @@ func (rf *Raft) GetState() (int, int, bool) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B)
-	Term int
-	CandidateId int
+	Term         int
+	CandidateId  int
 	LastLogIndex int
-	LastLogTerm int
+	LastLogTerm  int
 }
 
 //
@@ -162,25 +157,23 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A)
-	Term int
+	Term        int
 	VoteGranted bool
 }
 
-
 // AppendEntriesArgs
 type AppendEntriesArgs struct {
-	Term int
-	LeaderId int
+	Term         int
+	LeaderId     int
 	PrevLogIndex int
-
-	PrevLogTerm int
-	Entries[] string // problem
+	PrevLogTerm  int
+	Entries      Log
 	LeaderCommit int
 }
 
 // AppendEntriesReply
 type AppendEntriesReply struct {
-	Term int
+	Term    int
 	Success bool
 }
 
@@ -191,41 +184,42 @@ type AppendEntriesReply struct {
 // Example RequestVote RPC handler
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	//fmt.Println(strconv.Itoa(args.CandidateId))
 	rf.mux.Lock()
-	if args.Term < rf.currentTerm {  // follower, candidate, leader
+	if rf.role == Follower {
+		rf.timeReset <- MAX_NORMAL
+	}
+	if args.Term < rf.currentTerm { // follower, candidate, leader
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		rf.mux.Unlock()
+		return
 	}
-	if args.Term == rf.currentTerm { // follower, candidate, leader
-		if rf.role == Leader {
+	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		if rf.lastLoggedTerm < args.LastLogTerm ||
+			(rf.lastLoggedTerm == args.LastLogTerm && rf.lastLoggedIndex <= args.LastLogTerm) {
+			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
-			reply.VoteGranted = false
+			rf.votedFor = args.CandidateId
+		}
+		rf.mux.Unlock()
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.role = Follower
+		rf.voteCount = 0
+		rf.timeReset <- MIN_NORMAL
+		if rf.lastLoggedTerm < args.LastLogTerm ||
+			(rf.lastLoggedTerm == args.LastLogTerm && rf.lastLoggedIndex <= args.LastLogTerm) {
+			rf.votedFor = args.CandidateId
+			reply.Term = args.Term
+			reply.VoteGranted = true
 			rf.mux.Unlock()
 			return
 		}
-		if rf.votedFor == args.CandidateId || rf.votedFor == -1 { // problem log index check
-			//fmt.Println(strconv.Itoa(rf.me) + " Vote for" + strconv.Itoa(args.CandidateId))
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = true
-
-			rf.votedFor = args.CandidateId
-			rf.currentTerm = args.Term
-		} else {
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = false
-		}
 	}
-	if args.Term > rf.currentTerm {
-		rf.role = Follower
-		rf.timeReset <- MIN_NORMAL
-		rf.currentTerm = args.Term
-		rf.votedFor = args.CandidateId
-		rf.voteCount = 0
-
-		reply.Term = args.Term
-		reply.VoteGranted = true
-	}
+	reply.VoteGranted = false
+	reply.Term = args.Term
 	rf.mux.Unlock()
 }
 
@@ -239,6 +233,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.voteCount = 0
 		reply.Term = args.Term
 		reply.Success = true
+	} else {
+		reply.Term = rf.currentTerm
+		reply.Success = false
 	}
 	rf.mux.Unlock()
 }
@@ -288,8 +285,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // not the struct itself
 //
 func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[peer].Call("Raft.RequestVote", args, reply)
-	if ok {  // follower, candidate, leader
+	//ok := rf.peers[peer].Call("Raft.RequestVote", args, reply)
+	ok := false
+	for !ok { // follower, candidate, leader
+		ok = rf.peers[peer].Call("Raft.RequestVote", args, reply)
+		if !ok {
+			continue
+		}
 		rf.mux.Lock()
 		if rf.currentTerm == reply.Term && reply.VoteGranted {
 			rf.voteCount += 1
@@ -304,18 +306,22 @@ func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestV
 			rf.mux.Unlock()
 			return ok
 		}
-		if (rf.voteCount > (len(rf.peers) / 2)) && (rf.role != Leader) {
+		if (rf.voteCount > (len(rf.peers) / 2)) && (rf.role == Candidate) {
 			rf.timeReset <- MIN_LEADER
 			rf.voteCount = 0
 			rf.role = Leader
 		}
 		rf.mux.Unlock()
 	}
+
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+	ok := false
+	for !ok {
+		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+	}
 	return ok
 }
 
@@ -388,19 +394,18 @@ func (rf *Raft) Kill() {
 //
 func Make(peers []*rpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:peers,
-		me:me,
-		applyCh: applyCh,
-		currentTerm:0,
-		votedFor:-1,
-		timerTicker:make(chan bool),
-		timeReset:make(chan int),
-		role:0,
-		voteCount:0,
-		population:len(peers),
-		leaderCh:make(chan int),
-		candidateCh:make(chan int),
-		followerCh:make(chan int),
+		peers:           peers,
+		me:              me,
+		applyCh:         applyCh,
+		currentTerm:     0,
+		votedFor:        -1,
+		timerTicker:     make(chan bool),
+		timeReset:       make(chan int),
+		role:            Follower,
+		voteCount:       0,
+		population:      len(peers),
+		lastLoggedIndex: 0,
+		lastLoggedTerm:  0,
 	}
 	go rf.timerRoutine()
 	go rf.mainRoutine()
@@ -412,7 +417,7 @@ func Make(peers []*rpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 func (rf *Raft) mainRoutine() {
 	for {
 		select {
-		case <- rf.timerTicker:
+		case <-rf.timerTicker:
 			rf.mux.Lock()
 			switch rf.role {
 			default:
@@ -426,10 +431,10 @@ func (rf *Raft) mainRoutine() {
 					}
 					go rf.sendRequestVote(i,
 						&RequestVoteArgs{
-							Term:rf.currentTerm,
-							CandidateId:rf.me,
-							LastLogIndex:len(rf.nextIndex),
-							LastLogTerm:-1, // problem
+							Term:         rf.currentTerm,
+							CandidateId:  rf.me,
+							LastLogIndex: rf.lastLoggedIndex, // problem
+							LastLogTerm:  rf.lastLoggedTerm,  // problem
 						}, &RequestVoteReply{})
 				}
 				rf.mux.Unlock()
@@ -441,12 +446,12 @@ func (rf *Raft) mainRoutine() {
 					}
 					go rf.sendAppendEntries(i,
 						&AppendEntriesArgs{
-							Term:rf.currentTerm,
-							LeaderId:rf.me,
-							PrevLogIndex:0, // problem
-							PrevLogTerm:0, //problem
-							Entries:nil,
-							LeaderCommit:0, // problem
+							Term:         rf.currentTerm,
+							LeaderId:     rf.me,
+							PrevLogIndex: 0,   // problem
+							PrevLogTerm:  0,   //problem
+							Entries:      Log{}, // problem
+							LeaderCommit: 0,   // problem
 						}, &AppendEntriesReply{})
 				}
 				rf.mux.Unlock()
@@ -459,10 +464,10 @@ func (rf *Raft) timerRoutine() {
 	max := MAX_NORMAL
 	min := MIN_NORMAL
 	for {
-		randTime := randInt(min, max) // may need to be longer
+		randTime := randInt(min, max)
 		timer := time.NewTimer(time.Duration(randTime) * time.Millisecond)
 		select {
-		case reset := <- rf.timeReset:
+		case reset := <-rf.timeReset:
 			if reset < MIN_NORMAL {
 				max = MAX_LEADER
 				min = MIN_LEADER
@@ -470,14 +475,13 @@ func (rf *Raft) timerRoutine() {
 				max = MAX_NORMAL
 				min = MIN_NORMAL
 			}
-		case <- timer.C:
+		case <-timer.C:
 			rf.timerTicker <- true
 		}
 	}
 }
 
 // Helper Functions
-func randInt(min , max int) int {
+func randInt(min, max int) int {
 	return min + rand.Intn(max-min)
 }
-
