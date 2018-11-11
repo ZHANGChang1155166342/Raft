@@ -31,8 +31,10 @@ package raft
 //
 
 import (
+	"fmt"
 	"github.com/cmu440/rpc"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -67,6 +69,11 @@ type Log struct {
 	Term    int
 }
 
+type Count struct {
+	mux sync.Mutex
+	count int
+}
+
 //
 // Raft struct
 // ===========
@@ -92,12 +99,13 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	applyHelperCh chan ApplyMsg
+	//applyHelperCh chan int
 	applyCh chan ApplyMsg
 
 	timerTicker chan bool
 	timeReset   chan int
 	voteCount   int
+	commitCount int
 
 	role            int
 	population      int
@@ -229,15 +237,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		//fmt.Println("Peer " + strconv.Itoa(rf.me) + " False Term " + strconv.Itoa(rf.currentTerm) + " " +strconv.Itoa(args.Term))
 		rf.mux.Unlock()
 		return
 	}
 	if args.Entries.Command == nil {
 		if args.Term >= rf.currentTerm {
-			rf.role = Follower
+			rf.role = Follower         // Problem CommitIndex
 			rf.timeReset <- MAX_NORMAL
 			rf.votedFor = -1
 			rf.voteCount = 0
+
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = min(rf.lastLoggedIndex, args.LeaderCommit)
+				for rf.lastApplied < rf.commitIndex {
+					rf.lastApplied += 1
+					rf.applyCh <- ApplyMsg{
+						Command: rf.log[rf.lastApplied].Command,
+						Index:   rf.lastApplied,
+					}
+				}
+			}
 
 			reply.Term = args.Term
 			reply.Success = true
@@ -247,9 +267,60 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.mux.Unlock()
 		return
-	}
+	} else {
 
+		//update term
+		rf.currentTerm = args.Term
+		// does not match
+		if rf.lastLoggedIndex < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			//fmt.Println("Peer " + strconv.Itoa(rf.me) + " False not match")
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			rf.mux.Unlock()
+			return
+		}
+		fmt.Println("At peer " + strconv.Itoa(rf.me) + " PrevIndex" + strconv.Itoa(args.PrevLogIndex))
+		if rf.lastLoggedIndex > args.PrevLogIndex && rf.log[args.PrevLogIndex + 1].Term == args.Entries.Term {
+			reply.Success = true
+			reply.Term = rf.currentTerm
+			rf.mux.Unlock()
+			return
+		}
+		if rf.lastLoggedIndex > args.PrevLogIndex && rf.log[args.PrevLogIndex + 1].Term != args.Entries.Term {
+			rf.log = rf.log[:args.PrevLogIndex + 1]
+			rf.lastLoggedIndex = args.PrevLogIndex
+		}
+		// new entries
+		//fmt.Println(strconv.Itoa(rf.lastLoggedIndex))
+		//fmt.Println(strconv.Itoa(args.PrevLogIndex))
+
+		rf.log = append(rf.log, args.Entries)
+		//fmt.Println("At Follower " + strconv.Itoa(rf.me) + " Append ")
+		rf.lastLoggedIndex += 1
+		rf.lastLoggedTerm = rf.currentTerm
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(rf.lastLoggedIndex, args.LeaderCommit)
+			//rf.applyHelperCh <- rf.commitIndex
+			for rf.lastApplied < rf.commitIndex {
+				rf.lastApplied += 1
+				//fmt.Println("************************************************")
+				//fmt.Println("At Follower " + strconv.Itoa(rf.me) + " Apply ")
+				//fmt.Println(rf.log[rf.lastApplied].Command)
+				//fmt.Println(rf.log)
+				//fmt.Println("************************************************")
+				rf.applyCh <- ApplyMsg{
+					Command: rf.log[rf.lastApplied].Command,
+					Index:   rf.lastApplied,
+				}
+			}
+		}
+		reply.Success = true
+		reply.Term  = rf.currentTerm
+		rf.mux.Unlock()
+		return
+	}
 }
+
 
 //
 // sendRequestVote
@@ -322,23 +393,95 @@ func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestV
 			rf.voteCount = 0
 			rf.role = Leader
 			for i := 0; i < rf.population; i++ {
-				if i == rf.me {
-					continue
-				}
 				rf.nextIndex[i] = rf.lastLoggedIndex + 1
 				rf.matchIndex[i] = 0
 			}
 		}
 		rf.mux.Unlock()
 	}
-
 	return ok
 }
 
-func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntriesHeartBeat(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := false
 	for !ok {
 		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+	}
+	rf.mux.Lock() 	//Problem
+	if reply.Term > rf.currentTerm {
+		rf.role = Follower
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.voteCount = 0
+
+		rf.timeReset <- MAX_NORMAL
+		rf.mux.Unlock()
+		return ok
+	}
+	rf.mux.Unlock()
+	return ok
+}
+
+func (rf * Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply, count *Count) bool {
+	ok := false
+	for {
+		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+		if !ok {
+			//fmt.Println("Server " + strconv.Itoa(peer) + " is Down")
+			//fmt.Println("Down check PrevLogIndex " + strconv.Itoa(args.PrevLogIndex))
+			continue
+		}
+		rf.mux.Lock()
+		if rf.role != Leader {
+			//fmt.Println("I am not Leader anymore")
+			rf.mux.Unlock()
+			return ok
+		}
+		if reply.Term > rf.currentTerm {
+			//fmt.Println("Catch Term Error")
+			rf.timeReset <- MAX_NORMAL
+			rf.role = Follower
+			rf.currentTerm = reply.Term
+			rf.votedFor = -1
+			rf.voteCount = 0
+			rf.mux.Unlock()
+			return ok
+		}
+		//fmt.Println("At peer " + strconv.Itoa(peer) + " PrevLogIndex is " + strconv.Itoa(args.PrevLogIndex))
+		if !reply.Success {
+			rf.nextIndex[peer] -= 1
+			args.PrevLogIndex -= 1
+		} else {
+			rf.nextIndex[peer] += 1
+			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+			args.PrevLogIndex += 1
+		}
+		if rf.lastLoggedIndex > rf.nextIndex[peer] {  // Problems
+			fmt.Println("Peer" + strconv.Itoa(peer) + " " + strconv.Itoa(rf.lastLoggedIndex))
+			fmt.Println(strconv.Itoa(rf.nextIndex[peer]))
+			fmt.Println(strconv.Itoa(args.PrevLogIndex))
+
+			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			args.Entries = rf.log[args.PrevLogIndex + 1]
+			args.LeaderCommit = rf.commitIndex
+			args.Term = rf.currentTerm
+			rf.mux.Unlock()
+			continue
+		}
+		rf.commitCount += 1
+		if rf.commitCount >= rf.population / 2 {
+			rf.commitIndex = rf.lastLoggedIndex
+			for rf.lastApplied < rf.commitIndex {
+				rf.lastApplied += 1
+				rf.applyCh <- ApplyMsg{
+					Command: rf.log[rf.lastApplied].Command,
+					Index:   rf.lastApplied,
+				}
+			}
+
+		}
+		rf.mux.Unlock()
+		break
 	}
 	return ok
 }
@@ -366,21 +509,40 @@ func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs, reply *Appe
 // the leader
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-
 	rf.mux.Lock()
 	isLeader := rf.role == Leader
 	if !isLeader {
 		rf.mux.Unlock()
-		return  index, term, isLeader
+		return  -1, -1, isLeader
 	}
-	// is a Leader
-	// Your code here (2B)
+	//Leader Operations when new Command Come int  Problem
+	newLog := Log{Command:command, Term:rf.currentTerm}
+	rf.log = append(rf.log, newLog)
+	rf.lastLoggedIndex += 1
+	rf.lastLoggedTerm = rf.currentTerm
+	// Send to server parallel
+	count := &Count{count:0}
+	rf.commitCount = 0
+	for i := 0; i < rf.population; i++ {
+		if i == rf.me {
+			continue
+		}
+		go rf.sendAppendEntriesNormal(i, &AppendEntriesArgs{
+			Term:rf.currentTerm,
+			LeaderId:rf.me,
+			PrevLogIndex:rf.lastLoggedIndex - 1,
+			PrevLogTerm:rf.log[rf.lastLoggedIndex - 1].Term,
+			Entries:newLog,
+			LeaderCommit:rf.commitIndex,
+		}, &AppendEntriesReply{}, count)
+	}
+	//Return Value
+	index := rf.lastLoggedIndex
+	term := rf.currentTerm
+	rf.mux.Unlock()
 	return index, term, isLeader
 }
 
-//
 // Kill
 // ====
 //
@@ -426,7 +588,7 @@ func Make(peers []*rpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 		votedFor:        -1,
 		timerTicker:     make(chan bool),
 		timeReset:       make(chan int),
-		applyHelperCh:   make(chan ApplyMsg),
+		//applyHelperCh:   make(chan int),
 		role:            Follower,
 		voteCount:       0,
 		population:      len(peers),
@@ -437,9 +599,11 @@ func Make(peers []*rpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 		lastApplied:     0,
 		nextIndex:       make([]int, len(peers)),
 		matchIndex:      make([]int, len(peers)),
-		log:make([]Log, 1),
+		log:             make([]Log, 1),
+		commitCount:0,
 	}
-
+	rf.log[0].Term = 0
+	rf.log[0].Command = nil
 	go rf.timerRoutine()
 	go rf.mainRoutine()
 	go rf.applyRoutine()
@@ -477,14 +641,14 @@ func (rf *Raft) mainRoutine() {
 					if i == rf.me {
 						continue
 					}
-					go rf.sendAppendEntries(i,
+					go rf.sendAppendEntriesHeartBeat(i,
 						&AppendEntriesArgs{
 							Term:         rf.currentTerm,
 							LeaderId:     rf.me,
-							PrevLogIndex: 0,   // problem
-							PrevLogTerm:  0,   //problem
-							Entries:      Log{Command:nil}, // problem
-							LeaderCommit: 0,   // problem
+							PrevLogIndex: 0,
+							PrevLogTerm:  0,
+							Entries:      Log{Command:nil},
+							LeaderCommit: rf.commitIndex,
 						}, &AppendEntriesReply{})
 				}
 				rf.mux.Unlock()
@@ -517,8 +681,6 @@ func (rf *Raft) timerRoutine() {
 func (rf *Raft) applyRoutine() {
 	for {
 		select {
-		case msg := <- rf.applyHelperCh:
-			rf.applyCh <- msg
 		}
 	}
 }
@@ -526,4 +688,12 @@ func (rf *Raft) applyRoutine() {
 // Helper Functions
 func randInt(min, max int) int {
 	return min + rand.Intn(max-min)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	} else {
+		return  b
+	}
 }
