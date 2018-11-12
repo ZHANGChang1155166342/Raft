@@ -205,7 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		if rf.lastLoggedTerm < args.LastLogTerm ||
-			(rf.lastLoggedTerm == args.LastLogTerm && rf.lastLoggedIndex <= args.LastLogTerm) {
+			(rf.lastLoggedTerm == args.LastLogTerm && rf.lastLoggedIndex <= args.LastLogIndex) {
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
 			rf.votedFor = args.CandidateId
@@ -219,7 +219,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteCount = 0
 		rf.timeReset <- MIN_NORMAL
 		if rf.lastLoggedTerm < args.LastLogTerm ||
-			(rf.lastLoggedTerm == args.LastLogTerm && rf.lastLoggedIndex <= args.LastLogTerm) {
+			(rf.lastLoggedTerm == args.LastLogTerm && rf.lastLoggedIndex <= args.LastLogIndex) {
 			rf.votedFor = args.CandidateId
 			reply.Term = args.Term
 			reply.VoteGranted = true
@@ -247,7 +247,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.timeReset <- MAX_NORMAL
 			rf.votedFor = -1
 			rf.voteCount = 0
-
 			if args.LeaderCommit > rf.commitIndex {
 				rf.commitIndex = min(rf.lastLoggedIndex, args.LeaderCommit)
 				for rf.lastApplied < rf.commitIndex {
@@ -268,18 +267,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mux.Unlock()
 		return
 	} else {
-
-		//update term
 		rf.currentTerm = args.Term
-		// does not match
 		if rf.lastLoggedIndex < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			//fmt.Println("Peer " + strconv.Itoa(rf.me) + " False not match")
 			reply.Success = false
 			reply.Term = rf.currentTerm
 			rf.mux.Unlock()
 			return
 		}
-		fmt.Println("At peer " + strconv.Itoa(rf.me) + " PrevIndex" + strconv.Itoa(args.PrevLogIndex))
 		if rf.lastLoggedIndex > args.PrevLogIndex && rf.log[args.PrevLogIndex + 1].Term == args.Entries.Term {
 			reply.Success = true
 			reply.Term = rf.currentTerm
@@ -290,30 +284,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = rf.log[:args.PrevLogIndex + 1]
 			rf.lastLoggedIndex = args.PrevLogIndex
 		}
-		// new entries
-		//fmt.Println(strconv.Itoa(rf.lastLoggedIndex))
-		//fmt.Println(strconv.Itoa(args.PrevLogIndex))
-
+		fmt.Println("****************************")
+		fmt.Println("At Peer:" + strconv.Itoa(rf.me))
+		fmt.Println(rf.log)
+		fmt.Println(args.Entries)
+		fmt.Println("PrevLogIndex:" + strconv.Itoa(args.PrevLogIndex))
+		fmt.Println("PrevLogTerm:" + strconv.Itoa(args.PrevLogTerm))
+		fmt.Println("****************************")
 		rf.log = append(rf.log, args.Entries)
-		//fmt.Println("At Follower " + strconv.Itoa(rf.me) + " Append ")
 		rf.lastLoggedIndex += 1
 		rf.lastLoggedTerm = rf.currentTerm
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(rf.lastLoggedIndex, args.LeaderCommit)
-			//rf.applyHelperCh <- rf.commitIndex
 			for rf.lastApplied < rf.commitIndex {
 				rf.lastApplied += 1
-				//fmt.Println("************************************************")
-				//fmt.Println("At Follower " + strconv.Itoa(rf.me) + " Apply ")
-				//fmt.Println(rf.log[rf.lastApplied].Command)
-				//fmt.Println(rf.log)
-				//fmt.Println("************************************************")
 				rf.applyCh <- ApplyMsg{
 					Command: rf.log[rf.lastApplied].Command,
 					Index:   rf.lastApplied,
 				}
 			}
 		}
+
 		reply.Success = true
 		reply.Term  = rf.currentTerm
 		rf.mux.Unlock()
@@ -367,11 +358,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // not the struct itself
 //
 func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	//ok := rf.peers[peer].Call("Raft.RequestVote", args, reply)
 	ok := false
 	for !ok { // follower, candidate, leader
 		ok = rf.peers[peer].Call("Raft.RequestVote", args, reply)
 		if !ok {
+			fmt.Println("Call Failed")
 			continue
 		}
 		rf.mux.Lock()
@@ -447,20 +438,16 @@ func (rf * Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, repl
 			rf.mux.Unlock()
 			return ok
 		}
-		//fmt.Println("At peer " + strconv.Itoa(peer) + " PrevLogIndex is " + strconv.Itoa(args.PrevLogIndex))
 		if !reply.Success {
-			rf.nextIndex[peer] -= 1
 			args.PrevLogIndex -= 1
+			rf.nextIndex[peer] -= 1
 		} else {
 			rf.nextIndex[peer] += 1
 			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
 			args.PrevLogIndex += 1
 		}
-		if rf.lastLoggedIndex > rf.nextIndex[peer] {  // Problems
-			fmt.Println("Peer" + strconv.Itoa(peer) + " " + strconv.Itoa(rf.lastLoggedIndex))
-			fmt.Println(strconv.Itoa(rf.nextIndex[peer]))
-			fmt.Println(strconv.Itoa(args.PrevLogIndex))
-
+		fmt.Println("Next Index:" + strconv.Itoa(rf.nextIndex[peer]) + " PrevLogIndex:" + strconv.Itoa(args.PrevLogIndex) + " LastLogIndex:" + strconv.Itoa(rf.lastLoggedIndex))
+		if rf.lastLoggedIndex >= rf.nextIndex[peer] {
 			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 			args.Entries = rf.log[args.PrevLogIndex + 1]
 			args.LeaderCommit = rf.commitIndex
@@ -523,6 +510,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Send to server parallel
 	count := &Count{count:0}
 	rf.commitCount = 0
+	fmt.Println("********************")
+	fmt.Println("Leader:" + strconv.Itoa(rf.me))
+	fmt.Println(rf.log)
+	fmt.Println("********************")
 	for i := 0; i < rf.population; i++ {
 		if i == rf.me {
 			continue
@@ -530,9 +521,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		go rf.sendAppendEntriesNormal(i, &AppendEntriesArgs{
 			Term:rf.currentTerm,
 			LeaderId:rf.me,
-			PrevLogIndex:rf.lastLoggedIndex - 1,
-			PrevLogTerm:rf.log[rf.lastLoggedIndex - 1].Term,
-			Entries:newLog,
+			PrevLogIndex:rf.nextIndex[i] - 1,
+			PrevLogTerm:rf.log[rf.nextIndex[i] - 1].Term,
+			Entries:Log{
+				Command:rf.log[rf.nextIndex[i]].Command,
+				Term:rf.log[rf.nextIndex[i]].Term,
+			},
 			LeaderCommit:rf.commitIndex,
 		}, &AppendEntriesReply{}, count)
 	}
@@ -606,7 +600,6 @@ func Make(peers []*rpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 	rf.log[0].Command = nil
 	go rf.timerRoutine()
 	go rf.mainRoutine()
-	go rf.applyRoutine()
 	// Your initialization code here (2A, 2B)
 	return rf
 }
@@ -674,13 +667,6 @@ func (rf *Raft) timerRoutine() {
 			}
 		case <-timer.C:
 			rf.timerTicker <- true
-		}
-	}
-}
-
-func (rf *Raft) applyRoutine() {
-	for {
-		select {
 		}
 	}
 }
