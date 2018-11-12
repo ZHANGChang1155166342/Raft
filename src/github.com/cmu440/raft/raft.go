@@ -384,32 +384,32 @@ func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestV
 	return ok
 }
 
-func (rf *Raft) sendAppendEntriesHeartBeat(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := false
-	for {
-		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
-		if !ok {
-			return ok
-		}
-		rf.mux.Lock() //Problem
-		if reply.Term > rf.currentTerm {
-			rf.role = Follower
-			rf.currentTerm = reply.Term
-			rf.votedFor = -1
-			rf.voteCount = 0
-
-			rf.timeReset <- MAX_NORMAL
-			rf.mux.Unlock()
-			return ok
-		}
-		rf.mux.Unlock()
-		return ok
-	}
-}
+//func (rf *Raft) sendAppendEntriesHeartBeat(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+//	ok := false
+//	for {
+//		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+//		if !ok {
+//			return ok
+//		}
+//		rf.mux.Lock() //Problem
+//		if reply.Term > rf.currentTerm {
+//			rf.role = Follower
+//			rf.currentTerm = reply.Term
+//			rf.votedFor = -1
+//			rf.voteCount = 0
+//
+//			rf.timeReset <- MAX_NORMAL
+//			rf.mux.Unlock()
+//			return ok
+//		}
+//		rf.mux.Unlock()
+//		return ok
+//	}
+//}
 
 func (rf *Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply, count *Count) bool {
 	ok := false
-	for {
+	//for {
 		args.mux.Lock()
 		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
 		//fmt.Println("Running " + strconv.Itoa(count.count) + " pos1")
@@ -443,9 +443,9 @@ func (rf *Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, reply
 			args.PrevLogIndex -= 1
 			rf.nextIndex[peer] = args.PrevLogIndex + 1
 		} else {
-			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
 			args.PrevLogIndex += len(args.Entries)
 			rf.nextIndex[peer] = args.PrevLogIndex + 1
+			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
 		}
 		if rf.lastLoggedIndex >= rf.nextIndex[peer] {
 			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
@@ -453,11 +453,23 @@ func (rf *Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, reply
 			args.LeaderCommit = rf.commitIndex
 			args.Term = rf.currentTerm
 			rf.mux.Unlock()
-			continue
+			return ok
 		}
-		rf.commitCount += 1
-		if rf.commitCount > rf.population / 2 {
-			rf.commitIndex = rf.lastLoggedIndex
+		counter := 0
+		max := 0
+		for _, entry := range rf.matchIndex {
+			if entry > max {
+				max = entry
+			}
+		}
+		for _, entry := range rf.matchIndex {
+			if entry == max {
+				counter += 1
+			}
+		}
+		if counter > rf.population / 2 {
+			rf.commitIndex = max
+			//rf.commitIndex = rf.lastLoggedIndex
 			for rf.lastApplied < rf.commitIndex && rf.log[rf.commitIndex].Term == rf.currentTerm {
 				rf.lastApplied += 1
 				//fmt.Println("*****************************************")
@@ -475,8 +487,8 @@ func (rf *Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, reply
 		//fmt.Println(rf.log)
 		//fmt.Println("*****************")
 		rf.mux.Unlock()
-		break
-	}
+		//break
+	//}
 	return ok
 }
 
@@ -514,6 +526,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, newLog)
 	rf.lastLoggedIndex += 1
 	rf.lastLoggedTerm = rf.currentTerm
+	rf.matchIndex[rf.me] = rf.lastLoggedIndex
 	// Send to server parallel
 	rf.count += 1
 	rf.close = append(rf.close, false)
@@ -638,19 +651,20 @@ func (rf *Raft) mainRoutine() {
 				}
 				rf.mux.Unlock()
 			case Leader:
+				c := &Count{count: rf.count}
 				for i := 0; i < rf.population; i++ {
 					if i == rf.me {
 						continue
 					}
-					go rf.sendAppendEntriesHeartBeat(i,
+					go rf.sendAppendEntriesNormal(i,
 						&AppendEntriesArgs{
 							Term:         rf.currentTerm,
 							LeaderId:     rf.me,
-							PrevLogIndex: 0,
-							PrevLogTerm:  0,
-							Entries:      nil,
+							PrevLogIndex: rf.nextIndex[i] - 1,
+							PrevLogTerm:  rf.log[rf.nextIndex[i] - 1].Term,
+							Entries:      rf.log[rf.nextIndex[i]:],
 							LeaderCommit: rf.commitIndex,
-						}, &AppendEntriesReply{})
+						}, &AppendEntriesReply{}, c)
 				}
 				rf.mux.Unlock()
 			}
@@ -691,3 +705,4 @@ func min(a, b int) int {
 		return b
 	}
 }
+
