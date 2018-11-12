@@ -370,63 +370,63 @@ func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestV
 
 func (rf *Raft) sendAppendEntriesNormal(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := false
-		args.mux.Lock()
-		ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
-		args.mux.Unlock()
-		if !ok {
-			//continue
-			return ok
-		}
-		rf.mux.Lock()
-		if rf.role != Leader {
-			rf.mux.Unlock()
-			return ok
-		}
-		if reply.Term > rf.currentTerm {
-			rf.timeReset <- MAX_NORMAL
-			rf.role = Follower
-			rf.currentTerm = reply.Term
-			rf.votedFor = -1
-			rf.voteCount = 0
-			rf.mux.Unlock()
-			return ok
-		}
-		if !reply.Success {
-			args.PrevLogIndex -= 1
-			rf.nextIndex[peer] = args.PrevLogIndex + 1
-		} else {
-			args.PrevLogIndex += len(args.Entries)
-			rf.nextIndex[peer] = args.PrevLogIndex + 1
-			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
-		}
-		if rf.lastLoggedIndex >= rf.nextIndex[peer] {
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-			args.Entries = rf.log[args.PrevLogIndex+1:]
-			args.LeaderCommit = rf.commitIndex
-			args.Term = rf.currentTerm
-			rf.mux.Unlock()
-			return ok
-		}
-		max := rf.lastLoggedIndex
-		counter := 0
-		for _, entry := range rf.matchIndex {
-			if entry == max {
-				counter += 1
-			}
-		}
-		if counter > rf.population / 2 {
-			rf.commitIndex = max
-			for rf.lastApplied < rf.commitIndex && rf.log[rf.commitIndex].Term == rf.currentTerm {
-				rf.lastApplied += 1
-				rf.applyCh <- ApplyMsg{
-					Command: rf.log[rf.lastApplied].Command,
-					Index:   rf.lastApplied,
-				}
-			}
-		}
+	args.mux.Lock()
+	ok = rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+	args.mux.Unlock()
+	if !ok {
+		return ok
+	}
+	rf.mux.Lock()
+	if rf.role != Leader {
 		rf.mux.Unlock()
+		return ok
+	}
+	if reply.Term > rf.currentTerm {
+		rf.timeReset <- MAX_NORMAL
+		rf.role = Follower
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.voteCount = 0
+		rf.mux.Unlock()
+		return ok
+	}
+	if !reply.Success {
+		args.PrevLogIndex -= 1
+		rf.nextIndex[peer] = args.PrevLogIndex + 1
+	} else {
+		args.PrevLogIndex += len(args.Entries)
+		rf.nextIndex[peer] = args.PrevLogIndex + 1
+		rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+	}
+	if rf.lastLoggedIndex >= rf.nextIndex[peer] {
+		args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+		args.Entries = rf.log[args.PrevLogIndex+1:]
+		args.LeaderCommit = rf.commitIndex
+		args.Term = rf.currentTerm
+		rf.mux.Unlock()
+		return ok
+	}
+	max := rf.lastLoggedIndex
+	counter := 0
+	for _, entry := range rf.matchIndex {
+		if entry == max {
+			counter += 1
+		}
+	}
+	if counter > rf.population/2 {
+		rf.commitIndex = max
+		for rf.lastApplied < rf.commitIndex && rf.log[rf.commitIndex].Term == rf.currentTerm {
+			rf.lastApplied += 1
+			rf.applyCh <- ApplyMsg{
+				Command: rf.log[rf.lastApplied].Command,
+				Index:   rf.lastApplied,
+			}
+		}
+	}
+	rf.mux.Unlock()
 	return ok
 }
+
 //
 // Start
 // =====
@@ -584,7 +584,7 @@ func (rf *Raft) mainRoutine() {
 							Term:         rf.currentTerm,
 							LeaderId:     rf.me,
 							PrevLogIndex: rf.nextIndex[i] - 1,
-							PrevLogTerm:  rf.log[rf.nextIndex[i] - 1].Term,
+							PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
 							Entries:      rf.log[rf.nextIndex[i]:],
 							LeaderCommit: rf.commitIndex,
 						}, &AppendEntriesReply{})
@@ -628,4 +628,3 @@ func min(a, b int) int {
 		return b
 	}
 }
-
